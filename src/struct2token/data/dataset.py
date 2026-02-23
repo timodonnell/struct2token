@@ -52,6 +52,16 @@ class StructureDataset(Dataset):
         return self.cache_dir / f"{h}.pt"
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        # On parse failure, try the next index (up to 10 attempts)
+        for attempt in range(10):
+            try:
+                return self._load_sample((idx + attempt) % len(self))
+            except Exception:
+                continue
+        # Last resort: return a minimal dummy sample (will be masked out)
+        return self._dummy_sample()
+
+    def _load_sample(self, idx: int) -> dict[str, torch.Tensor]:
         row = self.index.iloc[idx]
         path = row["path"]
         chain_id = row.get("chain_id", None)
@@ -95,3 +105,15 @@ class StructureDataset(Dataset):
                     sample[k] = sample[k][: self.max_atoms]
 
         return sample
+
+    def _dummy_sample(self) -> dict[str, torch.Tensor]:
+        """Minimal valid sample for when all parse attempts fail."""
+        n = self.min_atoms
+        return {
+            "coords": torch.zeros(n, 3),
+            "atom_types": torch.zeros(n, dtype=torch.int32),
+            "residue_types": torch.zeros(n, dtype=torch.int32),
+            "residue_ids": torch.zeros(n, dtype=torch.int32),
+            "meta_classes": torch.full((n,), 3, dtype=torch.int32),
+            "known_mask": torch.zeros(n, dtype=torch.int32),
+        }

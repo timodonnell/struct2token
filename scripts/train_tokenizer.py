@@ -10,6 +10,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import sys
+
+# Ensure print output appears immediately (not buffered until process exit)
+os.environ["PYTHONUNBUFFERED"] = "1"
+sys.stdout.reconfigure(line_buffering=True)
 import random
 
 import numpy as np

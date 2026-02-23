@@ -63,6 +63,8 @@ class Trainer:
             pg["lr"] = self.tc.lr * mult
 
     def _build_dataloader(self, training: bool) -> DataLoader:
+        label = "train" if training else "val"
+        print(f"Building {label} dataloader...")
         ds = StructureDataset(
             index_path=self.config.data.index_path,
             cache_dir=self.config.data.cache_dir,
@@ -70,14 +72,18 @@ class Trainer:
             min_atoms=self.config.data.min_atoms,
             training=training,
         )
+        print(f"  {label} dataset: {len(ds):,} samples")
+        num_workers = self.config.data.num_workers
         return DataLoader(
             ds,
             batch_size=self.tc.batch_size,
             shuffle=training,
-            num_workers=self.config.data.num_workers,
+            num_workers=num_workers,
             collate_fn=collate_structures,
             pin_memory=True,
             drop_last=training,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=2 if num_workers > 0 else None,
         )
 
     def save_checkpoint(self, path: str | Path):
@@ -137,8 +143,8 @@ class Trainer:
         """Main training loop."""
         if train_loader is None:
             train_loader = self._build_dataloader(training=True)
-        if val_loader is None:
-            val_loader = self._build_dataloader(training=False)
+        # val_loader built lazily on first validation
+        self._val_loader = val_loader
 
         if resume_path is not None:
             self.load_checkpoint(resume_path)
@@ -165,6 +171,7 @@ class Trainer:
 
         data_iter = iter(train_loader)
         t_start = time.time()
+        print("Starting training loop...")
 
         while self.global_step < self.tc.max_steps:
             # Get batch (loop dataloader)
@@ -220,7 +227,9 @@ class Trainer:
 
             # Validation
             if self.global_step % self.tc.val_every == 0:
-                val_metrics = self.validate(val_loader)
+                if self._val_loader is None:
+                    self._val_loader = self._build_dataloader(training=False)
+                val_metrics = self.validate(self._val_loader)
                 if val_metrics:
                     print(f"  [Val] " + " ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
                     if self.wandb_run:

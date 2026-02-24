@@ -215,6 +215,7 @@ class AllAtomDAE(nn.Module):
         n_steps: int = 100,
         cfg_weight: float = 2.0,
         noise_weight: float = 0.45,
+        cond_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Decode token indices to 3D coordinates via diffusion sampling.
 
@@ -224,11 +225,15 @@ class AllAtomDAE(nn.Module):
             n_steps: number of Euler-Maruyama steps
             cfg_weight: classifier-free guidance weight
             noise_weight: stochastic noise injection weight
+            cond_mask: (B, K) bool, which tokens to condition on.
+                If None, all tokens are used. Set to False for truncated
+                positions when evaluating adaptive tokenization.
 
         Returns:
             coords: (B, N, 3) predicted coordinates in nm
         """
         B = indices.shape[0]
+        K = indices.shape[1]
         device = indices.device
 
         if isinstance(n_atoms, int):
@@ -240,10 +245,15 @@ class AllAtomDAE(nn.Module):
         fsq_codes = self.fsq.indices_to_codes(indices)  # (B, K, fsq_dim)
         codes = self.to_decoder(fsq_codes)  # (B, K, d_dec)
 
+        # Apply conditioning mask (zero out truncated tokens)
+        if cond_mask is not None:
+            codes = codes * cond_mask.unsqueeze(-1).float()
+
         # Unconditional codes (for CFG)
         uncond_codes = torch.zeros_like(codes)
-        uncond_mask = torch.ones(B, codes.shape[1], dtype=torch.bool, device=device)
-        cond_mask = torch.ones(B, codes.shape[1], dtype=torch.bool, device=device)
+        uncond_mask = torch.ones(B, K, dtype=torch.bool, device=device)
+        if cond_mask is None:
+            cond_mask = torch.ones(B, K, dtype=torch.bool, device=device)
 
         # Padding mask for generated atoms
         if isinstance(n_atoms, torch.Tensor):

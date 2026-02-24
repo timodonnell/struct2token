@@ -12,11 +12,29 @@ from ..losses.rmsd import backbone_rmsd, compute_rmsd, sidechain_rmsd
 from ..losses.tm import compute_tm_score
 
 
+def ca_rmsd(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    meta_classes: torch.Tensor,
+    padding_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """RMSD computed only on Cα/C3' reference atoms (meta_class == 1).
+
+    Aligns and evaluates on the same atom set, giving a direct comparison
+    to APT and Kanzi which report Cα-only RMSD.
+    """
+    ca_mask = meta_classes == 1  # META_CREF
+    if padding_mask is not None:
+        ca_mask = ca_mask & padding_mask
+    return compute_rmsd(pred, target, ca_mask, align=True)
+
+
 @dataclass
 class MetricsAccumulator:
     """Accumulate per-sample metrics and compute aggregate statistics."""
 
     all_atom_rmsd: List[float] = field(default_factory=list)
+    ca_rmsd_values: List[float] = field(default_factory=list)
     bb_rmsd: List[float] = field(default_factory=list)
     sc_rmsd: List[float] = field(default_factory=list)
     tm_scores: List[float] = field(default_factory=list)
@@ -47,6 +65,11 @@ class MetricsAccumulator:
         aa_rmsd = compute_rmsd(pred, target, padding_mask, align=True)
         for b in range(B):
             self.all_atom_rmsd.append(aa_rmsd[b].item())
+
+        # Cα / C3' RMSD
+        ca = ca_rmsd(pred, target, meta_classes, padding_mask)
+        for b in range(B):
+            self.ca_rmsd_values.append(ca[b].item())
 
         # Backbone RMSD
         bb = backbone_rmsd(pred, target, meta_classes, padding_mask)
@@ -88,6 +111,7 @@ class MetricsAccumulator:
 
         result = {}
         result.update(_stats(self.all_atom_rmsd, "all_atom_rmsd"))
+        result.update(_stats(self.ca_rmsd_values, "ca_rmsd"))
         result.update(_stats(self.bb_rmsd, "backbone_rmsd"))
         result.update(_stats(self.sc_rmsd, "sidechain_rmsd"))
         result.update(_stats(self.tm_scores, "tm_score"))

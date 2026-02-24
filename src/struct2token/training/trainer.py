@@ -11,13 +11,24 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from ..config import Config
+from ..config import Config, InferenceConfig
 from ..data.collate import collate_structures
 from ..data.dataset import StructureDataset
+from ..data.tokens import ENTITY_PROTEIN, ENTITY_RNA, ENTITY_SMALL_MOLECULE
+from ..inference.decode import roundtrip
+from ..inference.metrics import MetricsAccumulator
 from ..losses.rmsd import backbone_rmsd, compute_rmsd
 from ..model.dae import AllAtomDAE
 from .augmentation import apply_random_rotation
 from .ema import EMA
+
+NM_TO_ANGSTROM = 10.0
+
+ENTITY_NAMES = {
+    ENTITY_PROTEIN: "protein",
+    ENTITY_RNA: "rna",
+    ENTITY_SMALL_MOLECULE: "small_molecule",
+}
 
 
 def _cosine_schedule_with_warmup(step: int, warmup_steps: int, max_steps: int) -> float:
@@ -134,6 +145,93 @@ class Trainer:
             "val/size_loss": total_size / count,
         }
 
+    @torch.no_grad()
+    def _validate_structural(self, val_loader: DataLoader, max_batches: int = 10) -> dict:
+        """Roundtrip decode on val batches and compute structural metrics.
+
+        Uses EMA weights and 100 diffusion steps (same as benchmark).
+        Returns flat dict of wandb metrics in Angstroms.
+        """
+        self.model.eval()
+        inf_config = InferenceConfig(n_steps=100)
+
+        overall = MetricsAccumulator()
+        per_entity: dict[int, MetricsAccumulator] = {
+            ENTITY_PROTEIN: MetricsAccumulator(),
+            ENTITY_RNA: MetricsAccumulator(),
+            ENTITY_SMALL_MOLECULE: MetricsAccumulator(),
+        }
+
+        with self.ema.average_parameters():
+            for i, batch in enumerate(val_loader):
+                if i >= max_batches:
+                    break
+                batch = self._move_batch(batch)
+
+                pred_coords, _ = roundtrip(self.model, batch, inf_config)
+
+                # Pad pred to match batch padding length (collate pads to multiple of 8)
+                N_pred = pred_coords.shape[1]
+                N_batch = batch["coords"].shape[1]
+                if N_pred < N_batch:
+                    pad = torch.zeros(
+                        pred_coords.shape[0], N_batch - N_pred, 3,
+                        device=pred_coords.device,
+                    )
+                    pred_coords = torch.cat([pred_coords, pad], dim=1)
+
+                # Update overall accumulator
+                overall.update(
+                    pred=pred_coords,
+                    target=batch["coords"],
+                    meta_classes=batch["meta_classes"],
+                    residue_ids=batch["residue_ids"],
+                    padding_mask=batch["padding_mask"],
+                )
+
+                # Update per-entity accumulators (one sample at a time)
+                B = pred_coords.shape[0]
+                entity_types = batch["entity_types"]
+                for b in range(B):
+                    etype = entity_types[b].item()
+                    if etype in per_entity:
+                        per_entity[etype].update(
+                            pred=pred_coords[b : b + 1],
+                            target=batch["coords"][b : b + 1],
+                            meta_classes=batch["meta_classes"][b : b + 1],
+                            residue_ids=batch["residue_ids"][b : b + 1],
+                            padding_mask=batch["padding_mask"][b : b + 1],
+                        )
+
+        self.model.train()
+
+        # Build wandb metrics dict
+        result = {}
+        summary = overall.summary()
+
+        def _convert(src: dict, prefix: str, dst: dict):
+            for k, v in src.items():
+                if k == "n_samples":
+                    dst[f"{prefix}/n_samples"] = v
+                    continue
+                metric_name, stat = k.rsplit("/", 1)
+                if stat != "mean":
+                    continue
+                # Convert nm→Å for RMSD/RMSE metrics, leave TM-score as-is
+                if "rmsd" in metric_name or "rmse" in metric_name:
+                    dst[f"{prefix}/{metric_name}"] = v * NM_TO_ANGSTROM
+                else:
+                    dst[f"{prefix}/{metric_name}"] = v
+
+        _convert(summary, "val", result)
+
+        for etype, acc in per_entity.items():
+            if acc.all_atom_rmsd:
+                ename = ENTITY_NAMES[etype]
+                _convert(acc.summary(), f"val/{ename}", result)
+
+        return result
+
     def train(
         self,
         train_loader: DataLoader | None = None,
@@ -229,9 +327,30 @@ class Trainer:
             if self.global_step % self.tc.val_every == 0:
                 if self._val_loader is None:
                     self._val_loader = self._build_dataloader(training=False)
+
+                # Loss validation (fast, forward-only)
                 val_metrics = self.validate(self._val_loader)
+
+                # Structural validation (roundtrip decode)
+                struct_metrics = self._validate_structural(self._val_loader)
+                val_metrics.update(struct_metrics)
+
                 if val_metrics:
-                    print(f"  [Val] " + " ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()))
+                    # Print summary line
+                    fl = val_metrics.get("val/flow_loss", 0)
+                    sl = val_metrics.get("val/size_loss", 0)
+                    aa = val_metrics.get("val/all_atom_rmsd", 0)
+                    ca = val_metrics.get("val/ca_rmsd", 0)
+                    bb = val_metrics.get("val/backbone_rmsd", 0)
+                    sc = val_metrics.get("val/sidechain_rmsd", 0)
+                    tm = val_metrics.get("val/tm_score", 0)
+                    ns = val_metrics.get("val/n_samples", 0)
+                    print(
+                        f"  [Val] flow={fl:.2f} size={sl:.1f} | "
+                        f"RMSD: aa={aa:.1f}\u00c5 ca={ca:.1f}\u00c5 "
+                        f"bb={bb:.1f}\u00c5 sc={sc:.1f}\u00c5 "
+                        f"TM={tm:.3f} ({ns} samples)"
+                    )
                     if self.wandb_run:
                         import wandb
                         wandb.log(val_metrics, step=self.global_step)

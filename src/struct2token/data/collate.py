@@ -24,6 +24,7 @@ def collate_structures(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
         known_mask: (B, L) bool
         padding_mask: (B, L) bool — True for real atoms, False for padding
         lengths: (B,) int64 — original sequence lengths
+        entity_types: (B,) int64 — entity type per sample (0=protein, 1=rna, 2=small_molecule)
     """
     lengths = [s["coords"].shape[0] for s in batch]
     max_len = max(lengths)
@@ -40,6 +41,9 @@ def collate_structures(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
     out["known_mask"] = torch.zeros(B, padded_len, dtype=torch.bool)
     out["padding_mask"] = torch.zeros(B, padded_len, dtype=torch.bool)
     out["lengths"] = torch.tensor(lengths, dtype=torch.long)
+    out["entity_types"] = torch.tensor(
+        [s.get("entity_type", 0) for s in batch], dtype=torch.long
+    )
 
     for i, sample in enumerate(batch):
         n = lengths[i]

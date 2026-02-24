@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .mmcif_parser import parse_mmcif
+from .tokens import ENTITY_TYPE_MAP
 
 
 class StructureDataset(Dataset):
@@ -88,6 +89,10 @@ class StructureDataset(Dataset):
             if self.cache_dir is not None:
                 torch.save(sample, cache_path)
 
+        # Entity type from index
+        entity_str = row.get("entity_type", "protein")
+        sample["entity_type"] = ENTITY_TYPE_MAP.get(entity_str, 0)
+
         # Center coordinates on known atoms
         known = sample["known_mask"].bool()
         if known.any():
@@ -116,4 +121,5 @@ class StructureDataset(Dataset):
             "residue_ids": torch.zeros(n, dtype=torch.int32),
             "meta_classes": torch.full((n,), 3, dtype=torch.int32),
             "known_mask": torch.zeros(n, dtype=torch.int32),
+            "entity_type": 0,
         }

@@ -95,6 +95,17 @@ def main():
 
         pred_coords, indices = roundtrip(model, batch, inf_config)
 
+        # Pad pred to match batch padding (collate pads to multiple of 8,
+        # but decode produces max(lengths) atoms)
+        N_pred = pred_coords.shape[1]
+        N_batch = batch["coords"].shape[1]
+        if N_pred < N_batch:
+            pad = torch.zeros(
+                pred_coords.shape[0], N_batch - N_pred, 3,
+                device=pred_coords.device,
+            )
+            pred_coords = torch.cat([pred_coords, pad], dim=1)
+
         accumulator.update(
             pred=pred_coords,
             target=batch["coords"],

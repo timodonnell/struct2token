@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--grad_accum", type=int, default=None, help="Gradient accumulation steps")
     parser.add_argument("--seed", type=int, default=None)
 
     # Data overrides
@@ -58,6 +59,8 @@ def main():
         config.training.lr = args.lr
     if args.max_steps is not None:
         config.training.max_steps = args.max_steps
+    if args.grad_accum is not None:
+        config.training.grad_accum_steps = args.grad_accum
     if args.seed is not None:
         config.training.seed = args.seed
     if args.index_path is not None:

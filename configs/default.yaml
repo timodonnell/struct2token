@@ -18,7 +18,7 @@ model:
   max_seq_len: 8192
   n_tokens: 128
   cfg_drop_rate: 0.05
-  size_loss_weight: 0.01
+  size_loss_weight: 0.1
 
 data:
   mmcif_dir: "~/tim1/helico-data/raw/mmCIF"

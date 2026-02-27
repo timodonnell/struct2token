@@ -266,32 +266,43 @@ class Trainer:
         self.model.train()
         flow_weight = 1.0
         size_weight = self.config.model.size_loss_weight
+        accum_steps = self.tc.grad_accum_steps
 
         data_iter = iter(train_loader)
         t_start = time.time()
-        print("Starting training loop...")
+        effective_bs = self.tc.batch_size * accum_steps
+        print(f"Starting training loop... (batch_size={self.tc.batch_size} x accum={accum_steps} = effective {effective_bs})")
 
         while self.global_step < self.tc.max_steps:
-            # Get batch (loop dataloader)
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(train_loader)
-                batch = next(data_iter)
-
-            batch = self._move_batch(batch)
-            batch = apply_random_rotation(batch)
-
-            # Forward
             self.optimizer.zero_grad()
-            loss_dict = self.model(batch)
-            total_loss = (
-                flow_weight * loss_dict["flow_loss"]
-                + size_weight * loss_dict["size_loss"]
-            )
+            accum_flow = 0.0
+            accum_size = 0.0
 
-            # Backward
-            total_loss.backward()
+            for accum_i in range(accum_steps):
+                # Get batch (loop dataloader)
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(train_loader)
+                    batch = next(data_iter)
+
+                batch = self._move_batch(batch)
+                batch = apply_random_rotation(batch)
+
+                # Forward
+                loss_dict = self.model(batch)
+                total_loss = (
+                    flow_weight * loss_dict["flow_loss"]
+                    + size_weight * loss_dict["size_loss"]
+                ) / accum_steps
+
+                # Backward (accumulate gradients)
+                total_loss.backward()
+
+                accum_flow += loss_dict["flow_loss"].item() / accum_steps
+                accum_size += loss_dict["size_loss"].item() / accum_steps
+
+            # Step after accumulation
             grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.tc.grad_clip)
             self.optimizer.step()
             self._update_lr()
@@ -304,9 +315,9 @@ class Trainer:
                 elapsed = time.time() - t_start
                 lr = self.optimizer.param_groups[0]["lr"]
                 log = {
-                    "train/flow_loss": loss_dict["flow_loss"].item(),
-                    "train/size_loss": loss_dict["size_loss"].item(),
-                    "train/total_loss": total_loss.item(),
+                    "train/flow_loss": accum_flow,
+                    "train/size_loss": accum_size,
+                    "train/total_loss": accum_flow + size_weight * accum_size,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "train/lr": lr,
                     "train/step": self.global_step,

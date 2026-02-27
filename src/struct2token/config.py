@@ -64,6 +64,7 @@ class TrainingConfig:
     max_steps: int = 500_000
     batch_size: int = 2
     grad_clip: float = 1.0
+    grad_accum_steps: int = 1
     ema_decay: float = 0.999
     val_every: int = 5000
     save_every: int = 10000
